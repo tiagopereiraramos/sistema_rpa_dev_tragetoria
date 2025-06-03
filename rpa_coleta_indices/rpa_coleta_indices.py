@@ -148,9 +148,15 @@ class RPAColetaIndices(BaseRPA):
             ipca_valor = self.browser.find_element(
                 xpath="(//p[@class='variavel-dado'])[2]").text
 
+            ipca_mes_ref = self.browser.find_element(
+                xpath="(//p[@class='variavel-periodo'])[2]").text
+            # Se o scrapping retornar o mês junto com o valor, extrair e converter
+            # Por enquanto, usa o mês atual formatado
+
             dados_ipca = {
                 "tipo": "IPCA",
                 "valor": ipca_valor,
+                "mes": self._converter_formato_mes(ipca_mes_ref),
                 "periodo": "acumulado_12_meses",
                 "fonte": "IBGE",
                 "url": url_ibge,
@@ -292,9 +298,14 @@ class RPAColetaIndices(BaseRPA):
                 raise Exception(
                     "Valor 'Acumulado 12 meses' não encontrado no PDF.")
 
+            # Se o scrapping retornar o mês junto com o valor, extrair e converter
+            # Por enquanto, usa o mês atual formatado
+            mes_formatado = self._obter_mes_atual_formatado()
+
             dados_igpm = {
                 "tipo": "IGPM",
                 "valor": valor_igpm,
+                "mes": mes_formatado,
                 "periodo": "acumulado_12_meses",
                 "fonte": "FGV",
                 "url": url_fgv,
@@ -395,9 +406,118 @@ class RPAColetaIndices(BaseRPA):
         except Exception as e:
             raise Exception(f"Erro ao atualizar planilha: {str(e)}")
 
+    def _obter_mes_atual_formatado(self) -> str:
+        """Retorna o mês atual no formato usado na planilha (ex: abr.-25)"""
+        return datetime.now().strftime("%b.-%y").lower()
+
+    def _converter_formato_mes(self, mes_scrapping: str) -> str:
+        """
+        Converte formato do scrapping (Abr/2025) para formato da planilha (abr.-25)
+
+        Args:
+            mes_scrapping: Mês no formato do scrapping (ex: "Abr/2025")
+
+        Returns:
+            Mês no formato da planilha (ex: "abr.-25")
+        """
+        try:
+            # Mapeia meses em português para abreviações
+            meses_pt = {
+                'Jan': 'jan.', 'Fev': 'fev.', 'Mar': 'mar.', 'Abr': 'abr.',
+                'Mai': 'mai.', 'Jun': 'jun.', 'Jul': 'jul.', 'Ago': 'ago.',
+                'Set': 'set.', 'Out': 'out.', 'Nov': 'nov.', 'Dez': 'dez.'
+            }
+
+            # Parse do formato "Abr/2025"
+            if '/' in mes_scrapping:
+                mes_abrev, ano = mes_scrapping.strip().split('/')
+                mes_abrev = mes_abrev.strip()
+                ano = int(ano)
+
+                if mes_abrev in meses_pt:
+                    # Converte para formato da planilha: "abr.-25"
+                    return f"{meses_pt[mes_abrev]}-{ano % 100:02d}"
+                else:
+                    raise ValueError(f"Mês não reconhecido: {mes_abrev}")
+            else:
+                # Se já está no formato esperado, retorna como está
+                return mes_scrapping.lower()
+
+        except Exception as e:
+            raise Exception(
+                f"Erro ao converter formato do mês '{mes_scrapping}': {str(e)}")
+
+    def _obter_proximo_mes_esperado(self, ultimo_mes_planilha: str) -> str:
+        """
+        Calcula qual seria o próximo mês após o último da planilha
+
+        Args:
+            ultimo_mes_planilha: Último mês na planilha (formato: abr.-25)
+
+        Returns:
+            Próximo mês esperado no mesmo formato
+        """
+        try:
+            # Mapeia abreviações para números
+            meses_abrev = {
+                'jan.': 1, 'fev.': 2, 'mar.': 3, 'abr.': 4, 'mai.': 5, 'jun.': 6,
+                'jul.': 7, 'ago.': 8, 'set.': 9, 'out.': 10, 'nov.': 11, 'dez.': 12
+            }
+
+            # Parse do último mês da planilha
+            partes = ultimo_mes_planilha.strip().split('-')
+            if len(partes) != 2:
+                raise ValueError(
+                    f"Formato de mês inválido: {ultimo_mes_planilha}")
+
+            mes_abrev = partes[0].lower()
+            ano_curto = int(partes[1])
+
+            if mes_abrev not in meses_abrev:
+                raise ValueError(
+                    f"Abreviação de mês desconhecida: {mes_abrev}")
+
+            mes_num = meses_abrev[mes_abrev]
+
+            # Calcula próximo mês
+            if mes_num == 12:  # Dezembro -> Janeiro do próximo ano
+                proximo_mes = 1
+                proximo_ano = ano_curto + 1
+            else:
+                proximo_mes = mes_num + 1
+                proximo_ano = ano_curto
+
+            # Converte de volta para o formato da planilha
+            meses_abrev_inv = {v: k for k, v in meses_abrev.items()}
+            proximo_mes_abrev = meses_abrev_inv[proximo_mes]
+
+            return f"{proximo_mes_abrev}-{proximo_ano:02d}"
+
+        except Exception as e:
+            raise Exception(f"Erro ao calcular próximo mês: {str(e)}")
+
+    def _encontrar_ultimo_mes_com_dados(self, valores_planilha: list) -> str:
+        """
+        Encontra o último mês que possui dados na planilha
+
+        Args:
+            valores_planilha: Lista de todas as linhas da planilha
+
+        Returns:
+            Último mês com dados ou string vazia se não houver dados
+        """
+        ultimo_mes = ""
+
+        for linha in valores_planilha:
+            if len(linha) >= 2 and linha[0].strip() and linha[1].strip():
+                # Linha tem mês e valor preenchidos
+                ultimo_mes = linha[0].strip()
+
+        return ultimo_mes
+
     async def _atualizar_aba_ipca(self, planilha, dados_ipca: Dict[str, Any]):
         """
-        Atualiza aba IPCA da planilha
+        Atualiza aba IPCA da planilha verificando sequência de meses
 
         Args:
             planilha: Objeto da planilha Google Sheets
@@ -406,30 +526,61 @@ class RPAColetaIndices(BaseRPA):
         try:
             # Acessa aba IPCA
             aba_ipca = planilha.worksheet("IPCA")
+            valores_existentes = aba_ipca.get_all_values()
+
+            # Adiciona mês aos dados se não estiver presente
+            if 'mes' not in dados_ipca:
+                dados_ipca['mes'] = self._obter_mes_atual_formatado()
+
+            mes_dados = dados_ipca['mes']
+
+            # Encontra último mês com dados na planilha
+            ultimo_mes_planilha = self._encontrar_ultimo_mes_com_dados(
+                valores_existentes)
+
+            if ultimo_mes_planilha:
+                # Verifica se o mês dos dados é o próximo esperado
+                proximo_mes_esperado = self._obter_proximo_mes_esperado(
+                    ultimo_mes_planilha)
+
+                if mes_dados != proximo_mes_esperado:
+                    raise Exception(
+                        f"❌ Sequência de meses incorreta para IPCA. "
+                        f"Último mês na planilha: {ultimo_mes_planilha}, "
+                        f"Próximo esperado: {proximo_mes_esperado}, "
+                        f"Mês dos dados: {mes_dados}"
+                    )
+
+                self.log_progresso(
+                    f"✅ Sequência de mês validada - Último: {ultimo_mes_planilha}, "
+                    f"Atual: {mes_dados}"
+                )
+            else:
+                # Primeira inserção na planilha
+                self.log_progresso(
+                    "📝 Primeira inserção de dados IPCA na planilha")
 
             # Encontra próxima linha vazia
-            valores_existentes = aba_ipca.get_all_values()
-            linhas_usadas = [i for i, linha in enumerate(
-                valores_existentes) if any(celula.strip() for celula in linha)]
+            linhas_usadas = [i for i, linha in enumerate(valores_existentes)
+                             if any(celula.strip() for celula in linha)]
             proxima_linha = max(linhas_usadas) + 1 if linhas_usadas else 2
 
-            # Formata mês atual
-            mes_atual = datetime.now().strftime("%b.-%y").lower()
-
             # Atualiza células
-            aba_ipca.update_acell(f'A{proxima_linha}', mes_atual)
+            aba_ipca.update_acell(f'A{proxima_linha}', mes_dados)
             aba_ipca.update_acell(
                 f'B{proxima_linha}', f'{dados_ipca["valor"]}%')
 
             self.log_progresso(
-                f"✅ IPCA {dados_ipca['valor']}% inserido na linha {proxima_linha}")
+                f"✅ IPCA {dados_ipca['valor']}% inserido na linha {proxima_linha} "
+                f"para o mês {mes_dados}"
+            )
 
         except Exception as e:
             raise Exception(f"Erro ao atualizar aba IPCA: {str(e)}")
 
     async def _atualizar_aba_igpm(self, planilha, dados_igpm: Dict[str, Any]):
         """
-        Atualiza aba IGPM da planilha
+        Atualiza aba IGPM da planilha verificando sequência de meses
 
         Args:
             planilha: Objeto da planilha Google Sheets
@@ -438,26 +589,73 @@ class RPAColetaIndices(BaseRPA):
         try:
             # Acessa aba IGPM
             aba_igpm = planilha.worksheet("IGPM")
+            valores_existentes = aba_igpm.get_all_values()
+
+            # Adiciona mês aos dados se não estiver presente
+            if 'mes' not in dados_igpm:
+                dados_igpm['mes'] = self._obter_mes_atual_formatado()
+
+            mes_dados = dados_igpm['mes']
+
+            # Encontra último mês com dados na planilha
+            ultimo_mes_planilha = self._encontrar_ultimo_mes_com_dados(
+                valores_existentes)
+
+            if ultimo_mes_planilha:
+                # Verifica se o mês dos dados é o próximo esperado
+                proximo_mes_esperado = self._obter_proximo_mes_esperado(
+                    ultimo_mes_planilha)
+
+                if mes_dados != proximo_mes_esperado:
+                    raise Exception(
+                        f"❌ Sequência de meses incorreta para IGPM. "
+                        f"Último mês na planilha: {ultimo_mes_planilha}, "
+                        f"Próximo esperado: {proximo_mes_esperado}, "
+                        f"Mês dos dados: {mes_dados}"
+                    )
+
+                self.log_progresso(
+                    f"✅ Sequência de mês validada - Último: {ultimo_mes_planilha}, "
+                    f"Atual: {mes_dados}"
+                )
+            else:
+                # Primeira inserção na planilha
+                self.log_progresso(
+                    "📝 Primeira inserção de dados IGPM na planilha")
 
             # Encontra próxima linha vazia
-            valores_existentes = aba_igpm.get_all_values()
-            linhas_usadas = [i for i, linha in enumerate(
-                valores_existentes) if any(celula.strip() for celula in linha)]
+            linhas_usadas = [i for i, linha in enumerate(valores_existentes)
+                             if any(celula.strip() for celula in linha)]
             proxima_linha = max(linhas_usadas) + 1 if linhas_usadas else 2
 
-            # Formata mês atual
-            mes_atual = datetime.now().strftime("%b.-%y").lower()
-
             # Atualiza células
-            aba_igpm.update_acell(f'A{proxima_linha}', mes_atual)
+            aba_igpm.update_acell(f'A{proxima_linha}', mes_dados)
             aba_igpm.update_acell(
                 f'B{proxima_linha}', f'{dados_igpm["valor"]}%')
 
             self.log_progresso(
-                f"✅ IGPM {dados_igpm['valor']}% inserido na linha {proxima_linha}")
+                f"✅ IGPM {dados_igpm['valor']}% inserido na linha {proxima_linha} "
+                f"para o mês {mes_dados}"
+            )
 
         except Exception as e:
             raise Exception(f"Erro ao atualizar aba IGPM: {str(e)}")
+
+    def processar_dados_com_mes_scrapping(self, dados_indice: Dict[str, Any], mes_scrapping: str) -> Dict[str, Any]:
+        """
+        Processa dados do índice substituindo o mês pelo formato do scrapping convertido
+
+        Args:
+            dados_indice: Dados originais do índice
+            mes_scrapping: Mês no formato do scrapping (ex: "Abr/2025")
+
+        Returns:
+            Dados atualizados com mês convertido
+        """
+        dados_atualizados = dados_indice.copy()
+        dados_atualizados['mes'] = self._converter_formato_mes(mes_scrapping)
+        dados_atualizados['mes_original_scrapping'] = mes_scrapping
+        return dados_atualizados
 
 
 # Função auxiliar para uso direto
